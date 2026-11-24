@@ -22,14 +22,24 @@ local kit = (function()
 local kit = {}
 kit.W, kit.H = 480, 800
 
-function kit.font(name) return ctx.fonts and ctx.fonts[name] end
+-- a font by name ('small' / 'medium' / 'large'), or a number: that many pixels (ctx.fonts:size,
+-- API 2.3: the reader's .ttf font, or the nearest system font when there is none)
+function kit.font(name)
+  local F = ctx.fonts
+  if not F then return nil end
+  if type(name) == 'number' then
+    local ok, f = pcall(function() return F:size(name) end)
+    return ok and f or F.medium
+  end
+  return F[name]
+end
 function kit.width(f, s)
   local ok, w = pcall(function() return f:measure(s) end)
   return (ok and type(w) == 'number') and w or #s * 11
 end
 function kit.line_h(name)
   local ok, h = pcall(function() return kit.font(name).line_height end)
-  return (ok and tonumber(h)) or (name == 'large' and 30 or name == 'small' and 20 or 24)
+  return (ok and tonumber(h)) or (type(name) == 'number' and name * 5 // 4) or (name == 'large' and 30 or name == 'small' and 20 or 24)
 end
 
 -- drop the last character (a whole UTF-8 sequence)
@@ -192,7 +202,7 @@ local MAX_IVL = 1000                   -- the longest interval, in days
 local NEW_CHOICES = { 5, 10, 15, 20, 30, 50 }
 local ROW_H, ROWS = 84, 7
 
-local settings = { new_per_day = 15 }
+local settings = { new_per_day = 15, english = false }   -- english: show the built-in deck
 local decks = {}                       -- { key, name, source = 'package' | 'storage' | 'tsv' | 'own', file, cards, per, shards }
 local screen = 'decks'                 -- decks | study | done
 local deck, st = nil, nil              -- the open deck and its state
@@ -226,6 +236,10 @@ local function files_read(name)
   if not F then return nil end
   local ok, t = pcall(function()
     if not F:exists(name) then return nil end
+    -- some hosts hand back the whole file when no offset is given; one that needs them errors,
+    -- so the attempt is its own pcall and the chunked read below still runs
+    local okw, whole = pcall(function() return F:read(name) end)
+    if okw and type(whole) == 'string' and whole ~= '' then return whole end
     local parts, off = {}, 0
     for _i = 1, 64 do
       local piece = F:read(name, off, 65536)
@@ -315,14 +329,17 @@ local function load_settings()
   local t = kv(sread('settings.txt'))
   settings.new_per_day = tonumber(t.new_per_day) or 15
   settings.lock_deck = (t.lock_deck and t.lock_deck ~= '') and t.lock_deck or nil
+  settings.english = t.english == '1'
 end
 local function save_settings()
-  swrite('settings.txt', 'new_per_day=' .. settings.new_per_day .. '\nlock_deck=' .. (settings.lock_deck or ''))
+  swrite('settings.txt', 'new_per_day=' .. settings.new_per_day
+    .. '\nenglish=' .. (settings.english and '1' or '0')
+    .. '\nlock_deck=' .. (settings.lock_deck or ''))
 end
 
 local function discover()
   decks = {}
-  local info = pread('en_info.txt')
+  local info = settings.english and pread('en_info.txt') or nil
   if info then
     local t = kv(info)
     decks[#decks + 1] = { key = 'en', name = t.name or 'English', source = 'package',
@@ -597,9 +614,14 @@ local function open_deck(d)
   deck = d
   st = load_state(d)
   load_own(d); load_dels(d)
-  build_queue()
+  save_state(d)                  -- before the queue: opening a deck always leaves its state file
+  local okq, eq = pcall(build_queue)
+  if not okq then ERR = 'queue: ' .. tostring(eq) end
   screen, shown, scroll, last, session.done, msg = 'study', false, 0, nil, 0, nil
-  if #queue == 0 then screen = 'done' end
+  if #queue == 0 then
+    screen = 'done'
+    if not okq then msg = 'Could not read this deck (see the error below).' end
+  end
   save_state(d)
 end
 
@@ -700,6 +722,27 @@ local function toggle_lock(d)
   if not (okd and isdef == true) then pcall(function() L:set_default() end) end
   msg = 'Lock screen: cards from ' .. d.name .. '.'
 end
+
+-- what the app can see, written on every load: the deck folder's path, how many files each
+-- folder holds, the decks found and the last error. Read over USB as <app folder>/diag.txt.
+local function count_list(t)
+  local n = 0
+  for _k, v in pairs(type(t) == 'table' and t or {}) do if v ~= nil then n = n + 1 end end
+  return n
+end
+local function diag_text()
+  local F = ctx.files
+  local okf, lf = pcall(function() return F:list() end)
+  local oks, ls = pcall(function() return ctx.storage:list() end)
+  local ds = {}
+  for _k, d in ipairs(decks) do ds[#ds + 1] = d.key .. ':' .. d.source .. ':' .. d.cards end
+  return 'files_path=' .. deck_folder()
+    .. '\nfiles=' .. count_list(okf and lf)
+    .. '\nstorage=' .. count_list(oks and ls)
+    .. '\ndecks=' .. table.concat(ds, ',')
+    .. '\nerr=' .. (ERR or '')
+end
+local function write_diag() pcall(function() swrite('diag.txt', diag_text()) end) end
 
 local function show_decks()
   screen, deck = 'decks', nil
@@ -980,6 +1023,26 @@ local function draw_decks(gg)
   end
 end
 
+local function help_modal()
+  local F = ctx.files
+  local okf, lf = pcall(function() return F:list() end)
+  local oks, ls = pcall(function() return ctx.storage:list() end)
+  local names = {}
+  for _k, d in ipairs(decks) do names[#names + 1] = d.name .. ' (' .. d.cards .. ')' end
+  kit.show({ title = 'Anki',
+             lines = { 'Tap a deck to study it; long-press it to add a card.',
+                       'More decks: convert an Anki .apkg (e.g. from ankiweb.net/shared/decks) on a computer with apkg2cards.py and copy the files into the app folder on the SD card in USB mode. A "front<TAB>back" .tsv list there works too.',
+                       'Deck folder: ' .. deck_folder() .. ' (' .. count_list(okf and lf) .. ' files)',
+                       'App storage: ' .. count_list(oks and ls) .. ' files',
+                       'Decks found: ' .. (#names > 0 and table.concat(names, ', ') or 'none'),
+                       'While studying, Menu has Undo, Add card and Delete card.' },
+             rows = { { { 'English deck: ' .. (settings.english and 'on' or 'off'), function()
+                            settings.english = not settings.english
+                            save_settings(); discover(); refresh_summaries(); write_diag()
+                            kit.close(); help_modal() end },
+                        { 'Close', kit.close } } }, cancel = kit.close })
+end
+
 local DECK_BUTTONS = {
   { function() return 'New/day ' .. settings.new_per_day end, function()
       local k = 1
@@ -988,13 +1051,7 @@ local DECK_BUTTONS = {
       save_settings()
       refresh_summaries()
     end },
-  { function() return 'Help' end, function()
-      kit.show({ title = 'Anki',
-                 lines = { 'Tap a deck to study it; long-press it to add a card.',
-                           'More decks: convert an Anki .apkg (e.g. from ankiweb.net/shared/decks) on a computer with apkg2cards.py and copy the files into ' .. deck_folder() .. ' on the SD card in USB mode. A "front<TAB>back" .tsv list there works too.',
-                           'While studying, Menu has Undo, Add card and Delete card.' },
-                 rows = { { { 'Close', kit.close } } }, cancel = kit.close })
-    end },
+  { function() return 'Help' end, function() help_modal() end },
   { function() return 'Page ' .. (page + 1) .. '/' .. math.max(1, math.ceil(#decks / ROWS)) end, function()
       page = (page + 1) % math.max(1, math.ceil(#decks / ROWS))
     end },
@@ -1060,7 +1117,10 @@ function on_draw(c, gg)
       kit.button(gg, 12, BTN_Y, W - 24, BTN_H, 'Decks', { font = 'large' })
     end
     if msg then gg:text(12, BTN_Y - 30, kit.short(msg, 46), { font = kit.font('small') }) end
-    if ERR then gg:text(12, H - 24, kit.short('ERR ' .. ERR, 48), { font = kit.font('small') }) end
+    if ERR then
+      gg:rect(8, H - 52, W - 16, 40, { line_width = 2 })
+      for _k, l in ipairs(kit.wrap('ERR ' .. ERR, 'small', W - 32)) do gg:text(16, H - 46 + (_k - 1) * 18, l, { font = kit.font('small') }) end
+    end
   end)
   if not ok then pcall(function() gg:text(8, H - 60, kit.short('draw ERR ' .. tostring(e), 46)) end) end
 end
@@ -1171,8 +1231,9 @@ function on_load(c)
   math.randomseed(kit.now_ms() or 1)
   local ok, e = pcall(function() load_settings(); discover(); refresh_summaries() end)
   if not ok then ERR = tostring(e) end
+  write_diag()
 end
-function on_leave() pcall(write_lock_cards) end
+function on_leave() pcall(write_lock_cards); write_diag() end
 
 if rawget(_G, '__TEST') then
   __TEST.api = {

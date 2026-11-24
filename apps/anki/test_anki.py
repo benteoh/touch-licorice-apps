@@ -57,6 +57,14 @@ def deck_row(name):
     return r[name]
 
 
+# the built-in English deck is off unless switched on (this build is for converted decks);
+# Help lists what the app can see, and diag.txt keeps it for reading over USB
+assert 'English words B2-C1' not in g.texts(), g.texts()
+diag = g.store['diag.txt'] or ''
+assert 'files_path=' in diag and 'decks=' in diag, diag
+g.store['settings.txt'] = 'new_per_day=15\nenglish=1\nlock_deck='
+g.restart()
+
 # the deck list: the built-in English deck and My cards
 t = g.texts()
 assert 'Anki' in t and 'English words B2-C1' in t and 'My cards' in t, t
