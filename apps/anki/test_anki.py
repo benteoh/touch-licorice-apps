@@ -188,6 +188,18 @@ assert front() == 'cat'
 g.tap(240, 300); rate(4)
 assert front() == 'dog' and 'tvocab_p000.txt' in g.store
 
+# a deck whose file prefix has capitals (PimsleurItalian): the host's storage takes lowercase
+# names, so progress must be written lowercase or the deck never saves anything
+g.store['Caps_info.txt'] = 'name=Caps deck\ncards=2\nshards=1\nper=100\n'
+g.store['Caps_c000.txt'] = 'L1\tone\tuno\nL2\ttwo\tdue\n'
+g.restart()
+g.tap(*deck_row('Caps deck'))
+assert front() == 'one'
+g.tap(240, 300); rate(4)
+assert 'caps_st.txt' in g.store and 'caps_p000.txt' in g.store, sorted(g.store.keys())
+assert 'Caps_st.txt' not in g.store and 'Caps_p000.txt' not in g.store
+g.tap(400, 30); g.tap_label('Decks')
+
 # the same decks in the user folder (ctx.files, API 2.9, read 64 KB at a time) instead of the private files
 user = g.L.eval('{}')
 for k in [k for k in g.store if str(k).startswith('greek_') and not str(k).startswith('greek_p') and str(k) != 'greek_st.txt' or str(k) == 'vocab.tsv']:

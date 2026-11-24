@@ -223,7 +223,12 @@ local function sread(name)
   local ok, s = pcall(function() return ctx.storage:read(name) end)
   return (ok and type(s) == 'string') and s or nil
 end
-local function swrite(name, s) pcall(function() ctx.storage:write(name, s) end) end
+local write_err = nil
+local function swrite(name, s)
+  local ok, e = pcall(function() ctx.storage:write(name, s) end)
+  if not ok then write_err = tostring(e) .. ' (' .. name .. ')' end
+  return ok
+end
 local function sremove(name) pcall(function() ctx.storage:remove(name) end) end
 local function slist()
   local ok, t = pcall(function() return ctx.storage:list() end)
@@ -402,7 +407,10 @@ end
 
 ------------------------------------------------------------------ progress
 
-local function pname(d, s) return s == 'own' and (d.key .. '_pown.txt') or string.format('%s_p%03d.txt', d.key, s) end
+-- the reader's storage takes lowercase names: every file its own apps write is [a-z0-9_], and a
+-- deck's key comes from the converted file (PimsleurItalian), which the host refused to write
+local function skey(d) return (d.key:lower():gsub('[^%w]', '_')) end
+local function pname(d, s) return s == 'own' and (skey(d) .. '_pown.txt') or string.format('%s_p%03d.txt', skey(d), s) end
 
 -- a progress line: "key due S D reps lapses last state"; the 6-field lines of the SM-2 scheduler
 -- before v0.11 ("key due interval ease reps lapses") are read as FSRS records
@@ -440,7 +448,7 @@ local function save_prog(d, s, t)
 end
 
 local function load_state(d)
-  local t = kv(sread(d.key .. '_st.txt'))
+  local t = kv(sread(skey(d) .. '_st.txt'))
   local s = { next = tonumber(t.next) or 0, day = tonumber(t.day) or 0, new = tonumber(t.new) or 0, mins = {} }
   for k, m in (t.mins or ''):gmatch('([%w]+):(%-?%d+)') do s.mins[k == 'own' and 'own' or tonumber(k)] = tonumber(m) end
   local td = today()
@@ -452,12 +460,12 @@ local function save_state(d)
   local m = {}
   for k, v in pairs(st.mins) do m[#m + 1] = k .. ':' .. v end
   table.sort(m)
-  swrite(d.key .. '_st.txt', 'next=' .. st.next .. '\nday=' .. st.day .. '\nnew=' .. st.new .. '\nmins=' .. table.concat(m, ','))
+  swrite(skey(d) .. '_st.txt', 'next=' .. st.next .. '\nday=' .. st.day .. '\nnew=' .. st.new .. '\nmins=' .. table.concat(m, ','))
 end
 
 local function load_own(d)
   own = {}
-  for line in lines(sread(d.key .. '_own.txt') or '') do
+  for line in lines(sread(skey(d) .. '_own.txt') or '') do
     local id, f, b = line:match('^([^\t]+)\t([^\t]*)\t?(.*)$')
     if id then own[#own + 1] = { id = id, f = unesc(f), b = unesc(b) } end
   end
@@ -468,18 +476,18 @@ local function esc(s) return (s:gsub('\\', '\\\\'):gsub('\t', ' '):gsub('\r', ''
 local function save_own(d)
   local out = {}
   for _k, c in ipairs(own) do out[#out + 1] = c.id .. '\t' .. esc(c.f) .. '\t' .. esc(c.b) end
-  if #out == 0 then sremove(d.key .. '_own.txt') else swrite(d.key .. '_own.txt', table.concat(out, '\n') .. '\n') end
+  if #out == 0 then sremove(skey(d) .. '_own.txt') else swrite(skey(d) .. '_own.txt', table.concat(out, '\n') .. '\n') end
 end
 
 local function load_dels(d)
   dels = {}
-  for line in lines(sread(d.key .. '_del.txt') or '') do if line ~= '' then dels[line] = true end end
+  for line in lines(sread(skey(d) .. '_del.txt') or '') do if line ~= '' then dels[line] = true end end
 end
 local function save_dels(d)
   local out = {}
   for k in pairs(dels) do out[#out + 1] = k end
   table.sort(out)
-  if #out == 0 then sremove(d.key .. '_del.txt') else swrite(d.key .. '_del.txt', table.concat(out, '\n') .. '\n') end
+  if #out == 0 then sremove(skey(d) .. '_del.txt') else swrite(skey(d) .. '_del.txt', table.concat(out, '\n') .. '\n') end
 end
 
 ------------------------------------------------------------------ scheduling
@@ -662,12 +670,12 @@ local function write_lock_cards()
   if not d then return end
   local s, now, out = load_state(d), now_sec(), {}
   local mine = {}
-  for line in lines(sread(d.key .. '_own.txt') or '') do
+  for line in lines(sread(skey(d) .. '_own.txt') or '') do
     local id, f, b = line:match('^([^\t]+)\t([^\t]*)\t?(.*)$')
     if id then mine[id] = { f = f, b = b } end
   end
   local deleted = {}
-  for line in lines(sread(d.key .. '_del.txt') or '') do deleted[line] = true end
+  for line in lines(sread(skey(d) .. '_del.txt') or '') do deleted[line] = true end
   local function add(f, b, fs, bs)
     if f and f ~= '' and #out < LOCK_CARDS then
       local pic = (fs or '') ~= '' or (bs or '') ~= ''
@@ -740,7 +748,7 @@ local function diag_text()
     .. '\nfiles=' .. count_list(okf and lf)
     .. '\nstorage=' .. count_list(oks and ls)
     .. '\ndecks=' .. table.concat(ds, ',')
-    .. '\nerr=' .. (ERR or '')
+    .. '\nerr=' .. (ERR or '') .. '\nwrite_err=' .. (write_err or '')
 end
 local function write_diag() pcall(function() swrite('diag.txt', diag_text()) end) end
 
